@@ -1,5 +1,5 @@
 {
-  "name": "lie-tracker",
+  "name": "open-dossier",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -15,6 +15,8 @@
     "format": "prettier --write src/"
   },
   "dependencies": {
+    "marked": "^15.0.12",
+    "openai": "^5.5.1",
     "vue": "^3.5.13"
   },
   "devDependencies": {
