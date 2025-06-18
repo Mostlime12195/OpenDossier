@@ -2,6 +2,53 @@
 import { ref, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import { marked } from 'marked';
 
+// --- TYPE DEFINITIONS ---
+interface Source {
+  title: string;
+  url: string;
+}
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+type ChatCompletionRole = 'user' | 'assistant' | 'system';
+interface ChatCompletionMessage {
+  role: ChatCompletionRole;
+  content: string;
+}
+
+// API Response Types
+interface HackClubAiResponse {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+}
+
+interface HackClubAiStreamChunk {
+  choices?: Array<{
+    delta?: {
+      content?: string;
+    };
+    finish_reason?: string;
+  }>;
+}
+
+interface JinaSearchResponse {
+  data: Source[];
+}
+
+interface JinaReaderResponse {
+  data?: {
+    content: string;
+  };
+  content?: string;
+}
+
+
 // --- STATE MANAGEMENT ---
 const JINA_SEARCH_API = 'https://s.jina.ai/';
 const JINA_READER_API = 'https://r.jina.ai/';
@@ -19,8 +66,8 @@ const currentTopic = ref('');
 const isLoading = ref(false);
 const loadingStatus = ref('');
 
-const sources = ref<Array<{ title: string; url: string }>>([]);
-const messages = ref<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+const sources = ref<Source[]>([]);
+const messages = ref<Message[]>([]);
 
 const chatHistoryEl = ref<HTMLElement | null>(null);
 const chatInputEl = ref<HTMLTextAreaElement | null>(null);
@@ -54,9 +101,9 @@ const handleMouseUp = () => {
  * A robust fetch wrapper with error handling and flexible response parsing.
  * @param url The URL to fetch.
  * @param options The request options.
- * @returns The parsed JSON response or text content.
+ * @returns The parsed JSON response or text content as an unknown type.
  */
-async function robustFetch(url: string, options: RequestInit) {
+async function robustFetch(url: string, options: RequestInit): Promise<unknown> {
   try {
     const response = await fetch(url, options);
     if (!response.ok) {
@@ -84,7 +131,7 @@ async function robustFetch(url: string, options: RequestInit) {
 async function optimizeQuery(query: string): Promise<string> {
   loadingStatus.value = 'Optimizing search query...';
   try {
-    const response: any = await robustFetch(HACK_CLUB_AI_API, {
+    const response = await robustFetch(HACK_CLUB_AI_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -93,7 +140,8 @@ async function optimizeQuery(query: string): Promise<string> {
           { role: 'user', content: query }
         ]
       }),
-    });
+    }) as HackClubAiResponse;
+
     const optimized = response?.choices?.[0]?.message?.content?.trim();
     if (!optimized) {
       console.warn('Query optimization failed, using original query.');
@@ -122,12 +170,12 @@ async function handleInitialSubmit() {
     const searchUrl = `${JINA_SEARCH_API}${encodeURIComponent(optimizedQuery)}`;
     const searchResponse = await robustFetch(searchUrl, {
       headers: { 'Authorization': `Bearer ${jinaApiKey.value.trim()}`, 'Accept': 'application/json' },
-    });
+    }) as JinaSearchResponse;
 
     if (!searchResponse?.data || !Array.isArray(searchResponse.data) || searchResponse.data.length === 0) {
       throw new Error("Could not find any relevant sources. Try rephrasing your query.");
     }
-    const topSources = searchResponse.data.slice(0, 5);
+    const topSources: Source[] = searchResponse.data.slice(0, 5);
     sources.value = topSources;
 
     loadingStatus.value = `Reading ${topSources.length} sources...`;
@@ -142,7 +190,8 @@ async function handleInitialSubmit() {
     let successfulReads = 0;
     readerResults.forEach((result, index) => {
       if (result.status === 'fulfilled' && result.value) {
-        const content = result.value?.data?.content || result.value?.content || '';
+        const readerData = result.value as JinaReaderResponse;
+        const content = readerData?.data?.content || readerData?.content || '';
         if (content) {
           successfulReads++;
           combinedContext += `--- SOURCE [${index + 1}] ---\nTitle: ${topSources[index].title}\nURL: ${topSources[index].url}\n\n${content}\n\n`;
@@ -162,8 +211,9 @@ async function handleInitialSubmit() {
 
     await streamAiResponse([{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }]);
 
-  } catch (e: any) {
-    messages.value.push({ role: 'assistant', content: `**An error occurred during research:**\n\n${e.message}` });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    messages.value.push({ role: 'assistant', content: `**An error occurred during research:**\n\n${message}` });
   } finally {
     isLoading.value = false;
     loadingStatus.value = '';
@@ -179,10 +229,11 @@ async function handleFollowUpSubmit() {
 
   try {
     const history = messages.value.slice(0, -1);
-    const systemPrompt = { role: 'system', content: "You are a helpful research assistant. Continue the conversation based on the previous context." };
+    const systemPrompt: ChatCompletionMessage = { role: 'system', content: "You are a helpful research assistant. Continue the conversation based on the previous context." };
     await streamAiResponse([systemPrompt, ...history, { role: 'user', content: userMessage }]);
-  } catch (e: any) {
-    messages.value.push({ role: 'assistant', content: `**An error occurred:**\n\n${e.message}` });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    messages.value.push({ role: 'assistant', content: `**An error occurred:**\n\n${message}` });
   } finally {
     isLoading.value = false;
   }
@@ -192,7 +243,7 @@ async function handleFollowUpSubmit() {
  * Processes a non-standard stream of concatenated JSON objects from the Hack Club AI API.
  * @param messageHistory The conversation history to send to the AI.
  */
-async function streamAiResponse(messageHistory: Array<{ role: string; content: string }>) {
+async function streamAiResponse(messageHistory: ChatCompletionMessage[]) {
   let assistantResponse = '';
   messages.value.push({ role: 'assistant', content: '' });
   const lastMessageIndex = messages.value.length - 1;
@@ -253,7 +304,7 @@ async function streamAiResponse(messageHistory: Array<{ role: string; content: s
         buffer = buffer.slice(objectEndIndex); // Remove the processed object from the buffer.
 
         try {
-          const parsed = JSON.parse(jsonStr);
+          const parsed = JSON.parse(jsonStr) as HackClubAiStreamChunk;
           const content = parsed.choices?.[0]?.delta?.content || '';
           assistantResponse += content;
           messages.value[lastMessageIndex].content = assistantResponse;
@@ -267,8 +318,9 @@ async function streamAiResponse(messageHistory: Array<{ role: string; content: s
         }
       }
     }
-  } catch (e: any) {
-    messages.value[lastMessageIndex].content += `\n\n**An error occurred:**\n\n${e.message}`;
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    messages.value[lastMessageIndex].content += `\n\n**An error occurred:**\n\n${message}`;
   } finally {
     isLoading.value = false;
   }
